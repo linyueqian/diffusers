@@ -176,3 +176,8 @@ tags
 
 # wandb
 wandb
+
+*.sh
+*.slurm
+*.ipynb
+gligen*
