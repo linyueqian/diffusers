@@ -1046,8 +1046,8 @@ class GLIGENGlobalProjection(nn.Module):
         # mask replacing 
         if masks is None:
             masks = torch.ones(B, 1, device=objs.device, dtype=objs.dtype)
-        mask = mask.view(-1, 1, 1)
-        objs = objs * mask + null_objs * (1 - mask)
+        masks = masks.view(-1, 1, 1)
+        objs = objs * masks + null_objs * (1 - masks)
         
         # add pos 
         objs = objs + self.pos_embedding
