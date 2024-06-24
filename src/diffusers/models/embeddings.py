@@ -22,6 +22,7 @@ from torch import nn
 from ..utils import deprecate
 from .activations import FP32SiLU, get_activation
 from .attention_processor import Attention
+from .convnext import convnext_tiny
 
 
 def get_timestep_embedding(
@@ -997,6 +998,236 @@ class GLIGENTextBoundingboxProjection(nn.Module):
             objs_image = self.linears_image(torch.cat([image_embeddings, xyxy_embedding], dim=-1))
             objs = torch.cat([objs_text, objs_image], dim=1)
 
+        return objs
+
+
+class GLIGENGlobalProjection(nn.Module):
+    def __init__(self, resize_input=448, out_dim=768):
+        super().__init__()
+        self.resize_input = resize_input
+        self.down_factor = 32 # determined by the convnext backbone 
+        self.out_dim = out_dim
+        assert self.resize_input % self.down_factor == 0
+
+        if isinstance(out_dim, tuple):
+            out_dim = out_dim[0]
+
+        self.convnext_tiny_backbone = convnext_tiny(pretrained=True)
+        
+        self.num_tokens = (self.resize_input // self.down_factor) ** 2
+        convnext_feature_dim = 768
+        self.pos_embedding = nn.Parameter(
+            torch.empty(1, self.num_tokens, convnext_feature_dim).normal_(std=0.02)
+        )  # from BERT
+      
+        self.linears = nn.Sequential(
+            nn.Linear(convnext_feature_dim, 512),
+            nn.SiLU(),
+            nn.Linear(512, 512),
+            nn.SiLU(),
+            nn.Linear(512, out_dim),
+        )
+
+        self.null_feature = torch.nn.Parameter(torch.zeros([convnext_feature_dim]))
+
+    def forward(self, conditions, masks=None):
+        assert len(conditions.shape) == 4
+        B = conditions.shape[0]
+
+        conditions = torch.nn.functional.interpolate(conditions, self.resize_input)
+        features = self.convnext_tiny_backbone(conditions)
+        objs = features.reshape(B, -1, self.num_tokens)
+        objs = objs.permute(0, 2, 1) # N * Num_tokens * dim
+
+        # expand null token
+        null_objs = self.null_feature.view(1, 1, -1)
+        null_objs = null_objs.repeat(B, self.num_tokens, 1)
+        
+        # mask replacing 
+        if masks is None:
+            masks = torch.ones(B, 1, device=objs.device, dtype=objs.dtype)
+        mask = mask.view(-1, 1, 1)
+        objs = objs * mask + null_objs * (1 - mask)
+        
+        # add pos 
+        objs = objs + self.pos_embedding
+
+        # fuse them 
+        objs = self.linears(objs)
+
+        assert objs.shape == torch.Size([B, self.num_tokens, self.out_dim])        
+        return objs
+
+
+class GLIGENGroundingDownsampler(nn.Module):
+    def __init__(self, resize_input=256, out_dim=8, hidden_dim=None, input_type="lowres"):
+        super().__init__()
+        if input_type not in ["lowres", "canny", "hed", "depth", "normal"]:
+            raise NotImplementedError(f"Input type {input_type} is not supported")
+        self.input_type = input_type
+        self.resize_input = resize_input
+        self.out_dim = out_dim 
+
+        if input_type in ["lowres", "normal"]:
+            in_dim = 3
+        else:
+            in_dim = 1
+
+        if hidden_dim is None:
+            hidden_dim = 16 if input_type == "lowres" else 4
+
+        self.layers = nn.Sequential(
+            nn.Conv2d(in_dim, hidden_dim, 4, 2, 1),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim, out_dim, 4, 2, 1)
+        )
+
+    def forward(self, grounding_extra_input):
+        if self.input_type in ["canny", "depth", "hed"]:
+            # this is actually gary scale, but converted to rgb in dataset, information redudant 
+            grounding_extra_input = grounding_extra_input[:,0].unsqueeze(1)
+
+        out = torch.nn.functional.interpolate(
+            grounding_extra_input, 
+            (self.resize_input, self.resize_input), 
+            mode='bicubic'
+        )
+        out = self.layers(out)
+
+        assert out.shape[1] == self.out_dim 
+        return out
+
+
+class GLIGENAllRoundProjection(nn.Module):
+    def __init__(
+        self, 
+        positive_len, 
+        out_dim,
+        feature_type="boxes-phrases", 
+        fourier_freqs=8,
+        resize_input=448
+    ):
+        super().__init__()
+
+        # some of the variables won't be used in certain settings
+        # but let's just keep all of them
+        self.positive_len = positive_len
+        self.out_dim = out_dim
+        self.resize_input = resize_input
+        self.down_factor = 32 # determined by the convnext backbone 
+        self.num_tokens = (self.resize_input // self.down_factor) ** 2
+        self.fourier_embedder_dim = fourier_freqs
+        self.position_dim = fourier_freqs * 2 * 4  # 2: sin/cos, 4: xyxy
+        self.feature_type = feature_type
+        self.visual_feature_dim = 768 # hard-coded for convnext_tiny
+        # this is so that the current trained GLIGEN models can work
+        self.predefined_order = ["boxes", "phrases", "images", "canny", "lowres"]
+
+        self.feature_list = set(feature_type.split('-'))
+        # sanity check
+        assert self.feature_list.issubset(set(self.predefined_order))
+        if "phrases" in self.feature_list or "images" in self.feature_list:
+            assert "boxes" in self.feature_list, \
+                "Positional information is required for phrases/images"
+        self.feature_list = [f for f in self.predefined_order if f in self.feature_list]
+
+        if isinstance(out_dim, tuple):
+            out_dim = out_dim[0]
+
+        # initialize as dict
+        # later will be wrapped in Module/ParameterDict
+        self.linears = {}
+        self.null_feature = {}
+        # currently assuming just one visual backbone
+        self.visual_backbone = None
+        self.pos_embedding = None
+
+        for feature_name in self.feature_list:
+            if feature_name in {"phrases", "images"}:
+                self.linears[feature_name] = nn.Sequential(
+                    nn.Linear(self.positive_len + self.position_dim, 512),
+                    nn.SiLU(),
+                    nn.Linear(512, 512),
+                    nn.SiLU(),
+                    nn.Linear(512, out_dim),
+                )
+                self.null_feature[feature_name] = nn.Parameter(torch.zeros([self.positive_len]))
+            elif feature_name == "boxes":
+                self.null_feature[feature_name] = nn.Parameter(torch.zeros([self.position_dim]))
+            else:
+                self.linears[feature_name] = nn.Sequential(
+                    nn.Linear(self.visual_feature_dim, 512),
+                    nn.SiLU(),
+                    nn.Linear(512, 512),
+                    nn.SiLU(),
+                    nn.Linear(512, out_dim),
+                )
+                # self.null_feature[feature_name] = nn.Parameter(torch.zeros([self.visual_feature_dim]))
+                self.visual_backbone = convnext_tiny(pretrained=True)
+                self.pos_embedding = nn.Parameter(
+                    torch.empty(1, self.num_tokens, self.visual_feature_dim).normal_(std=0.02)
+                )
+                
+        self.linears = nn.ModuleDict(self.linears)
+        self.null_feature = nn.ParameterDict(self.null_feature)
+
+    def forward(
+        self,
+        boxes=None, boxes_masks=None,
+        phrases=None, phrases_masks=None,
+        images=None, images_masks=None,
+        lowres=None, canny=None,
+    ):
+        # not a good naming but let's follow the original code
+        objs = []
+        
+        for feature_name in self.feature_list:
+            assert eval(feature_name) is not None, \
+                f"Feature {feature_name} is not provided but required by the model"
+            if feature_name in {"boxes", "phrases", "images"}:
+                assert eval(f"{feature_name}_masks") is not None, \
+                    f"Masks for feature {feature_name} is not provided but required by the model"
+            
+            # boxes will always be processed first
+            if feature_name == "boxes":
+                # embedding position (it may includes padding as placeholder)
+                xyxy_embeds = get_fourier_embeds_from_boundingbox(self.fourier_embedder_dim, boxes)  # B*N*4 -> B*N*C
+
+                # learnable null embedding
+                xyxy_null_embeds = self.null_feature["boxes"].view(1, 1, -1)
+
+                # replace padding with learnable null embedding
+                xyxy_embeds = xyxy_embeds * boxes_masks + (1 - boxes_masks) * xyxy_null_embeds
+            
+            elif feature_name in {"phrases", "images"}:
+                cur_masks = eval(f"{feature_name}_masks").unsqueeze(-1)
+                cur_null_embeds = self.null_feature[feature_name].view(1, 1, -1)
+                cur_embeds = eval(feature_name) * cur_masks + (1 - cur_masks) * cur_null_embeds
+                cur_objs = self.linears[feature_name](torch.cat([cur_embeds, xyxy_embeds], dim=-1))
+                objs.append(cur_objs)
+
+            else: # lowres, canny, etc
+                B = eval(feature_name).shape[0]
+                cur_input = F.interpolate(eval(feature_name), size=(self.resize_input, self.resize_input))
+                cur_embeds = self.visual_backbone(cur_input)
+                cur_embeds = cur_embeds.reshape(B, -1, self.num_tokens)
+                cur_embeds = cur_embeds.permute(0, 2, 1) # [B, #tokens, D]
+
+                # don't think mask is necessary here
+                # https://github.com/gligen/GLIGEN/blob/f9dccb9c6cf48bad03c3666290a7dec8c5e58f3c/gligen_inference.py#L336
+                # the mask is always 1 anyway
+                # cur_null_embeds = self.null_feature[feature_name].view(1, 1, -1)
+                # cur_null_embeds = cur_null_embeds.repeat(B, self.num_tokens, 1)
+                # cur_masks = globalimgs_masks.view(-1, 1, 1)
+                # cur_embeds = cur_embeds * cur_masks + (1 - cur_masks) * cur_null_embeds
+
+                cur_embeds = cur_embeds + self.pos_embedding
+
+                cur_objs = self.linears[feature_name](cur_embeds)
+                assert cur_objs.shape == (B, self.num_tokens, self.out_dim)
+                objs.append(cur_objs)
+
+        objs = torch.cat(objs, dim=1)
         return objs
 
 

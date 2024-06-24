@@ -34,6 +34,9 @@ from ..attention_processor import (
 from ..embeddings import (
     GaussianFourierProjection,
     GLIGENTextBoundingboxProjection,
+    GLIGENGlobalProjection,
+    GLIGENGroundingDownsampler,
+    GLIGENAllRoundProjection,
     ImageHintTimeEmbedding,
     ImageProjection,
     ImageTimeEmbedding,
@@ -222,6 +225,8 @@ class UNet2DConditionModel(
         mid_block_only_cross_attention: Optional[bool] = None,
         cross_attention_norm: Optional[str] = None,
         addition_embed_type_num_heads: int = 64,
+        gligen_conv_in_extra_channels: int = 8,
+        gligen_condition_scale_factor: int = 2,
     ):
         super().__init__()
 
@@ -256,6 +261,15 @@ class UNet2DConditionModel(
 
         # input
         conv_in_padding = (conv_in_kernel - 1) // 2
+        if (
+            "canny" in attention_type or
+            "depth" in attention_type or
+            "normal" in attention_type or
+            "lowres" in attention_type
+        ):
+            in_channels += gligen_conv_in_extra_channels
+            self.gligen_conv_in_extra_channels = gligen_conv_in_extra_channels
+            self.gligen_condition_scale_factor = gligen_condition_scale_factor
         self.conv_in = nn.Conv2d(
             in_channels, block_out_channels[0], kernel_size=conv_in_kernel, padding=conv_in_padding
         )
@@ -481,6 +495,7 @@ class UNet2DConditionModel(
             block_out_channels[0], out_channels, kernel_size=conv_out_kernel, padding=conv_out_padding
         )
 
+        self.first_conv_type = "default"
         self._set_pos_net_if_use_gligen(attention_type=attention_type, cross_attention_dim=cross_attention_dim)
 
     def _check_config(
@@ -681,17 +696,64 @@ class UNet2DConditionModel(
             raise ValueError(f"addition_embed_type: {addition_embed_type} must be None, 'text' or 'text_image'.")
 
     def _set_pos_net_if_use_gligen(self, attention_type: str, cross_attention_dim: int):
-        if attention_type in ["gated", "gated-text-image"]:
+        # if attention_type in ["gated", "gated-text-image", "gated-text-tile"]:
+        #     positive_len = 768
+        #     if isinstance(cross_attention_dim, int):
+        #         positive_len = cross_attention_dim
+        #     elif isinstance(cross_attention_dim, (list, tuple)):
+        #         positive_len = cross_attention_dim[0]
+
+        #     if attention_type == "gated":
+        #         feature_type = "text-only"
+        #     elif attention_type == "gated-text-image": 
+        #         feature_type = "text-image"
+        #     else:
+        #         feature_type = "text-image-tile"
+        #     self.position_net = GLIGENTextBoundingboxProjection(
+        #         positive_len=positive_len, 
+        #         out_dim=cross_attention_dim, 
+        #         feature_type=feature_type
+        #     )
+        if attention_type in [
+            "gated", "gated-text-image", 
+            "gated-canny", "gated-normal", "gated-depth", "gated-lowres"
+        ]:
             positive_len = 768
             if isinstance(cross_attention_dim, int):
                 positive_len = cross_attention_dim
             elif isinstance(cross_attention_dim, (list, tuple)):
                 positive_len = cross_attention_dim[0]
 
-            feature_type = "text-only" if attention_type == "gated" else "text-image"
-            self.position_net = GLIGENTextBoundingboxProjection(
-                positive_len=positive_len, out_dim=cross_attention_dim, feature_type=feature_type
-            )
+            if attention_type in ["gated", "gated-text-image"]:
+                if attention_type == "gated":
+                    feature_type = "text-only"
+                elif attention_type == "gated-text-image": 
+                    feature_type = "text-image"
+                self.position_net = GLIGENTextBoundingboxProjection(
+                    positive_len=positive_len, 
+                    out_dim=cross_attention_dim, 
+                    feature_type=feature_type
+                )
+            else:
+                vae_scale_factor = 8 # hard-coded, but typically is the case
+                image_size = self.sample_size * vae_scale_factor
+                if attention_type in ["gated-canny", "gated-normal", "gated-depth"]:
+                    resize_input = image_size // 2
+                else:
+                    resize_input = image_size // self.gligen_condition_scale_factor
+
+                self.position_net = GLIGENGlobalProjection(
+                    resize_input=resize_input,
+                    out_dim=cross_attention_dim
+                )
+            
+                input_type = attention_type.split('-')[-1]
+                self.downsample_net = GLIGENGroundingDownsampler(
+                    resize_input=image_size // 2, # so the output size matches the sample size of unet
+                    input_type=input_type,
+                    out_dim=self.gligen_conv_in_extra_channels
+                )
+                self.first_conv_type = "GLIGEN"
 
     @property
     def attn_processors(self) -> Dict[str, AttentionProcessor]:
@@ -1029,6 +1091,10 @@ class UNet2DConditionModel(
             encoder_hidden_states = (encoder_hidden_states, image_embeds)
         return encoder_hidden_states
 
+    def restore_first_conv(self, state_dict):
+        self.conv_in.load_state_dict(state_dict)
+        self.first_conv_type = "default"
+
     def forward(
         self,
         sample: torch.Tensor,
@@ -1043,6 +1109,7 @@ class UNet2DConditionModel(
         mid_block_additional_residual: Optional[torch.Tensor] = None,
         down_intrablock_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
+        grounding_extra_input: Optional[torch.Tensor] = None,
         return_dict: bool = True,
     ) -> Union[UNet2DConditionOutput, Tuple]:
         r"""
@@ -1159,6 +1226,9 @@ class UNet2DConditionModel(
         )
 
         # 2. pre-process
+        if hasattr(self, "downsample_net") and self.first_conv_type == "GLIGEN":
+            temp = self.downsample_net(grounding_extra_input)
+            sample = torch.cat([sample, temp], dim=1)
         sample = self.conv_in(sample)
 
         # 2.5 GLIGEN position net

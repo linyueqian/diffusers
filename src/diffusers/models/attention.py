@@ -388,7 +388,7 @@ class BasicTransformerBlock(nn.Module):
         )
 
         # 4. Fuser
-        if attention_type == "gated" or attention_type == "gated-text-image":
+        if "gated" in attention_type: # == "gated" or attention_type == "gated-text-image":
             self.fuser = GatedSelfAttentionDense(dim, cross_attention_dim, num_attention_heads, attention_head_dim)
 
         # 5. Scale-shift for PixArt-Alpha.

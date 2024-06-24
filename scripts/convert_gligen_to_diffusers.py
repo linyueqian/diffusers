@@ -17,6 +17,9 @@ from diffusers import (
     StableDiffusionGLIGENTextImagePipeline,
     UNet2DConditionModel,
 )
+from diffusers.pipelines.stable_diffusion_gligen.pipeline_stable_diffusion_gligen_global import (
+    StableDiffusionGLIGENGlobalPipeline
+)
 from diffusers.pipelines.stable_diffusion.convert_from_ckpt import (
     assign_to_checkpoint,
     conv_attn_to_linear,
@@ -364,6 +367,8 @@ def convert_gligen_unet_checkpoint(checkpoint, config, path=None, extract_ema=Fa
     for key in keys:
         if "position_net" in key:
             new_checkpoint[key] = unet_state_dict[key]
+        if "downsample_net" in key:
+            new_checkpoint[key] = unet_state_dict[key]
 
     return new_checkpoint
 
@@ -455,7 +460,8 @@ def convert_gligen_to_diffusers(
     else:
         print("global_step key not found in model")
 
-    original_config = yaml.safe_load(original_config_file)
+    with open(original_config_file, "r") as f:
+        original_config = yaml.safe_load(f)
 
     if num_in_channels is not None:
         original_config["model"]["params"]["in_channels"] = num_in_channels
@@ -513,6 +519,16 @@ def convert_gligen_to_diffusers(
         )
     elif attention_type == "gated":
         pipe = StableDiffusionGLIGENPipeline(
+            vae=vae,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            unet=unet,
+            scheduler=scheduler,
+            safety_checker=None,
+            feature_extractor=None,
+        )
+    else:
+        pipe = StableDiffusionGLIGENGlobalPipeline(
             vae=vae,
             text_encoder=text_encoder,
             tokenizer=tokenizer,
