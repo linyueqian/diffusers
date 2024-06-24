@@ -24,6 +24,7 @@ except OptionalDependencyNotAvailable:
 else:
     _import_structure["pipeline_stable_diffusion_gligen"] = ["StableDiffusionGLIGENPipeline"]
     _import_structure["pipeline_stable_diffusion_gligen_text_image"] = ["StableDiffusionGLIGENTextImagePipeline"]
+    _import_structure["pipeline_stable_diffusion_gligen_global"] = ["StableDiffusionGLIGENGlobalPipeline"]
 
 if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     try:
@@ -35,6 +36,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     else:
         from .pipeline_stable_diffusion_gligen import StableDiffusionGLIGENPipeline
         from .pipeline_stable_diffusion_gligen_text_image import StableDiffusionGLIGENTextImagePipeline
+        from .pipeline_stable_diffusion_gligen_global import StableDiffusionGLIGENGlobalPipeline
 
 else:
     import sys
