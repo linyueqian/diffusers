@@ -1005,12 +1005,11 @@ class GLIGENGlobalProjection(nn.Module):
     def __init__(self, resize_input=448, out_dim=768):
         super().__init__()
         self.resize_input = resize_input
-        self.down_factor = 32 # determined by the convnext backbone 
-        self.out_dim = out_dim
-        assert self.resize_input % self.down_factor == 0
-
+        self.down_factor = 32 # determined by the convnext backbone
         if isinstance(out_dim, tuple):
             out_dim = out_dim[0]
+        self.out_dim = out_dim
+        assert self.resize_input % self.down_factor == 0
 
         self.convnext_tiny_backbone = convnext_tiny(pretrained=True)
         
