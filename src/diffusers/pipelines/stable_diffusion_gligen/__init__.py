@@ -25,6 +25,7 @@ else:
     _import_structure["pipeline_stable_diffusion_gligen"] = ["StableDiffusionGLIGENPipeline"]
     _import_structure["pipeline_stable_diffusion_gligen_text_image"] = ["StableDiffusionGLIGENTextImagePipeline"]
     _import_structure["pipeline_stable_diffusion_gligen_global"] = ["StableDiffusionGLIGENGlobalPipeline"]
+    _import_structure["pipeline_stable_diffusion_gligen_global_text"] = ["StableDiffusionGLIGENGlobalTextPipeline"]
 
 if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     try:
@@ -37,6 +38,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from .pipeline_stable_diffusion_gligen import StableDiffusionGLIGENPipeline
         from .pipeline_stable_diffusion_gligen_text_image import StableDiffusionGLIGENTextImagePipeline
         from .pipeline_stable_diffusion_gligen_global import StableDiffusionGLIGENGlobalPipeline
+        from .pipeline_stable_diffusion_gligen_global_text import StableDiffusionGLIGENGlobalTextPipeline
 
 else:
     import sys

@@ -228,6 +228,7 @@ else:
         "StableDiffusionGLIGENPipeline",
         "StableDiffusionGLIGENTextImagePipeline",
         "StableDiffusionGLIGENGlobalPipeline",
+        "StableDiffusionGLIGENGlobalTextPipeline",
     ]
     _import_structure["stable_video_diffusion"] = ["StableVideoDiffusionPipeline"]
     _import_structure["stable_diffusion_xl"].extend(
@@ -494,6 +495,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             StableDiffusionGLIGENPipeline, 
             StableDiffusionGLIGENTextImagePipeline,
             StableDiffusionGLIGENGlobalPipeline,
+            StableDiffusionGLIGENGlobalTextPipeline,
         )
         from .stable_diffusion_ldm3d import StableDiffusionLDM3DPipeline
         from .stable_diffusion_panorama import StableDiffusionPanoramaPipeline

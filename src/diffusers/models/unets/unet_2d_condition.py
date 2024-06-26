@@ -36,7 +36,7 @@ from ..embeddings import (
     GLIGENTextBoundingboxProjection,
     GLIGENGlobalProjection,
     GLIGENGroundingDownsampler,
-    GLIGENAllRoundProjection,
+    GLIGENGlobalTextBoundingboxProjection,
     ImageHintTimeEmbedding,
     ImageProjection,
     ImageTimeEmbedding,
@@ -716,7 +716,8 @@ class UNet2DConditionModel(
         #     )
         if attention_type in [
             "gated", "gated-text-image", 
-            "gated-canny", "gated-normal", "gated-depth", "gated-lowres"
+            "gated-canny", "gated-normal", "gated-depth", "gated-lowres",
+            "gated-text-lowres", "gated-text-image-lowres"
         ]:
             positive_len = 768
             if isinstance(cross_attention_dim, int):
@@ -734,7 +735,7 @@ class UNet2DConditionModel(
                     out_dim=cross_attention_dim, 
                     feature_type=feature_type
                 )
-            else:
+            elif attention_type in ["gated-canny", "gated-normal", "gated-depth", "gated-lowres"]:
                 vae_scale_factor = 8 # hard-coded, but typically is the case
                 image_size = self.sample_size * vae_scale_factor
                 if attention_type in ["gated-canny", "gated-normal", "gated-depth"]:
@@ -745,6 +746,35 @@ class UNet2DConditionModel(
                 self.position_net = GLIGENGlobalProjection(
                     resize_input=resize_input,
                     out_dim=cross_attention_dim
+                )
+            
+                input_type = attention_type.split('-')[-1]
+                self.downsample_net = GLIGENGroundingDownsampler(
+                    resize_input=image_size // 2, # so the output size matches the sample size of unet
+                    input_type=input_type,
+                    out_dim=self.gligen_conv_in_extra_channels
+                )
+                self.first_conv_type = "GLIGEN"
+            else:
+                vae_scale_factor = 8 # hard-coded, but typically is the case
+                image_size = self.sample_size * vae_scale_factor
+                if attention_type in ["gated-canny", "gated-normal", "gated-depth"]:
+                    resize_input = image_size // 2
+                else:
+                    resize_input = image_size // self.gligen_condition_scale_factor
+
+                if "gated-text" in attention_type:
+                    feature_type = "text-only"
+                elif "gated-text-image" in attention_type: 
+                    feature_type = "text-image"
+                else:
+                    raise ValueError(f"Unknown attention type: {attention_type}")
+                
+                self.position_net = GLIGENGlobalTextBoundingboxProjection(
+                    positive_len=positive_len, 
+                    out_dim=cross_attention_dim, 
+                    feature_type=feature_type,
+                    resize_input=resize_input
                 )
             
                 input_type = attention_type.split('-')[-1]

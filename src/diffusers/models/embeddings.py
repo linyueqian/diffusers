@@ -1097,6 +1097,161 @@ class GLIGENGroundingDownsampler(nn.Module):
         return out
 
 
+class GLIGENGlobalTextBoundingboxProjection(nn.Module):
+    def __init__(
+        self, 
+        positive_len, 
+        out_dim, 
+        feature_type="text-only", 
+        fourier_freqs=8,
+        resize_input=448,
+    ):
+        super().__init__()
+        self.positive_len = positive_len
+        if isinstance(out_dim, tuple):
+            out_dim = out_dim[0]
+        self.out_dim = out_dim
+
+        self.fourier_embedder_dim = fourier_freqs
+        self.position_dim = fourier_freqs * 2 * 4  # 2: sin/cos, 4: xyxy
+
+        if feature_type == "text-only":
+            self.linears = nn.Sequential(
+                nn.Linear(self.positive_len + self.position_dim, 512),
+                nn.SiLU(),
+                nn.Linear(512, 512),
+                nn.SiLU(),
+                nn.Linear(512, out_dim),
+            )
+            self.null_positive_feature = torch.nn.Parameter(torch.zeros([self.positive_len]))
+
+        elif feature_type == "text-image":
+            self.linears_text = nn.Sequential(
+                nn.Linear(self.positive_len + self.position_dim, 512),
+                nn.SiLU(),
+                nn.Linear(512, 512),
+                nn.SiLU(),
+                nn.Linear(512, out_dim),
+            )
+            self.linears_image = nn.Sequential(
+                nn.Linear(self.positive_len + self.position_dim, 512),
+                nn.SiLU(),
+                nn.Linear(512, 512),
+                nn.SiLU(),
+                nn.Linear(512, out_dim),
+            )
+            self.null_text_feature = torch.nn.Parameter(torch.zeros([self.positive_len]))
+            self.null_image_feature = torch.nn.Parameter(torch.zeros([self.positive_len]))
+
+        self.null_position_feature = torch.nn.Parameter(torch.zeros([self.position_dim]))
+
+        self.resize_input = resize_input
+        self.down_factor = 32 # determined by the convnext backbone
+        if isinstance(out_dim, tuple):
+            out_dim = out_dim[0]
+        self.out_dim = out_dim
+        assert self.resize_input % self.down_factor == 0
+
+        self.convnext_tiny_backbone = convnext_tiny(pretrained=True)
+        
+        self.num_tokens = (self.resize_input // self.down_factor) ** 2
+        convnext_feature_dim = 768
+        self.pos_embedding = nn.Parameter(
+            torch.empty(1, self.num_tokens, convnext_feature_dim).normal_(std=0.02)
+        )  # from BERT
+      
+        self.linears_global = nn.Sequential(
+            nn.Linear(convnext_feature_dim, 512),
+            nn.SiLU(),
+            nn.Linear(512, 512),
+            nn.SiLU(),
+            nn.Linear(512, out_dim),
+        )
+
+        self.null_global_feature = torch.nn.Parameter(torch.zeros([convnext_feature_dim]))
+
+    def forward(
+        self,
+        boxes=None,
+        masks=None,
+        positive_embeddings=None,
+        phrases_masks=None,
+        image_masks=None,
+        phrases_embeddings=None,
+        image_embeddings=None,
+        global_conditions=None,
+        global_masks=None
+    ):
+        ###################################################
+        # global image
+        assert len(global_conditions.shape) == 4
+        B = global_conditions.shape[0]
+
+        global_conditions = torch.nn.functional.interpolate(global_conditions, self.resize_input)
+        features = self.convnext_tiny_backbone(global_conditions)
+        global_objs = features.reshape(B, -1, self.num_tokens)
+        global_objs = objs.permute(0, 2, 1) # N * Num_tokens * dim
+
+        # expand null token
+        null_global_objs = self.null_global_feature.view(1, 1, -1)
+        null_global_objs = null_global_objs.repeat(B, self.num_tokens, 1)
+        
+        # mask replacing 
+        if global_masks is None:
+            global_masks = torch.ones(B, 1, device=objs.device, dtype=objs.dtype)
+        global_masks = global_masks.view(-1, 1, 1)
+        global_objs = global_objs * masks + null_global_objs * (1 - masks)
+        
+        # add pos 
+        global_objs = global_objs + self.pos_embedding
+
+        # fuse them 
+        global_objs = self.linears_global(global_objs)
+        assert global_objs.shape == torch.Size([B, self.num_tokens, self.out_dim])
+
+        ###################################################
+        # boxes, text phrases, local images
+        masks = masks.unsqueeze(-1)
+
+        # embedding position (it may includes padding as placeholder)
+        xyxy_embedding = get_fourier_embeds_from_boundingbox(self.fourier_embedder_dim, boxes)  # B*N*4 -> B*N*C
+
+        # learnable null embedding
+        xyxy_null = self.null_position_feature.view(1, 1, -1)
+
+        # replace padding with learnable null embedding
+        xyxy_embedding = xyxy_embedding * masks + (1 - masks) * xyxy_null
+
+        # positionet with text only information
+        if positive_embeddings is not None:
+            # learnable null embedding
+            positive_null = self.null_positive_feature.view(1, 1, -1)
+
+            # replace padding with learnable null embedding
+            positive_embeddings = positive_embeddings * masks + (1 - masks) * positive_null
+
+            objs = self.linears(torch.cat([positive_embeddings, xyxy_embedding], dim=-1))
+
+        # positionet with text and image infomation
+        else:
+            phrases_masks = phrases_masks.unsqueeze(-1)
+            image_masks = image_masks.unsqueeze(-1)
+
+            # learnable null embedding
+            text_null = self.null_text_feature.view(1, 1, -1)
+            image_null = self.null_image_feature.view(1, 1, -1)
+
+            # replace padding with learnable null embedding
+            phrases_embeddings = phrases_embeddings * phrases_masks + (1 - phrases_masks) * text_null
+            image_embeddings = image_embeddings * image_masks + (1 - image_masks) * image_null
+
+            objs_text = self.linears_text(torch.cat([phrases_embeddings, xyxy_embedding], dim=-1))
+            objs_image = self.linears_image(torch.cat([image_embeddings, xyxy_embedding], dim=-1))
+            objs = torch.cat([objs_text, objs_image], dim=1)
+
+        return torch.cat([objs, global_objs], dim=1)
+
+
 class GLIGENAllRoundProjection(nn.Module):
     def __init__(
         self, 
