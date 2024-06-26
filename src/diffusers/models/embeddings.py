@@ -1190,24 +1190,25 @@ class GLIGENGlobalTextBoundingboxProjection(nn.Module):
         global_conditions = torch.nn.functional.interpolate(global_conditions, self.resize_input)
         features = self.convnext_tiny_backbone(global_conditions)
         global_objs = features.reshape(B, -1, self.num_tokens)
-        global_objs = objs.permute(0, 2, 1) # N * Num_tokens * dim
+        global_objs = global_objs.permute(0, 2, 1) # N * Num_tokens * dim
 
         # expand null token
         null_global_objs = self.null_global_feature.view(1, 1, -1)
         null_global_objs = null_global_objs.repeat(B, self.num_tokens, 1)
-        
+
         # mask replacing 
         if global_masks is None:
             global_masks = torch.ones(B, 1, device=objs.device, dtype=objs.dtype)
         global_masks = global_masks.view(-1, 1, 1)
-        global_objs = global_objs * masks + null_global_objs * (1 - masks)
+        global_objs = global_objs * global_masks + null_global_objs * (1 - global_masks)
         
         # add pos 
         global_objs = global_objs + self.pos_embedding
 
         # fuse them 
         global_objs = self.linears_global(global_objs)
-        assert global_objs.shape == torch.Size([B, self.num_tokens, self.out_dim])
+        assert global_objs.shape == torch.Size([B, self.num_tokens, self.out_dim]), \
+            f"Global objs shape: {global_objs.shape} != {[B, self.num_tokens, self.out_dim]}"
 
         ###################################################
         # boxes, text phrases, local images

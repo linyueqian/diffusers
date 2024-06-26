@@ -427,6 +427,8 @@ class StableDiffusionGLIGENGlobalTextPipeline(DiffusionPipeline, StableDiffusion
         height,
         width,
         callback_steps,
+        gligen_phrases,
+        gligen_boxes,
         negative_prompt=None,
         prompt_embeds=None,
         negative_prompt_embeds=None,
@@ -467,6 +469,12 @@ class StableDiffusionGLIGENGlobalTextPipeline(DiffusionPipeline, StableDiffusion
                     f" got: `prompt_embeds` {prompt_embeds.shape} != `negative_prompt_embeds`"
                     f" {negative_prompt_embeds.shape}."
                 )
+        
+        if len(gligen_phrases) != len(gligen_boxes):
+            raise ValueError(
+                "length of `gligen_phrases` and `gligen_boxes` has to be same, but"
+                f" got: `gligen_phrases` {len(gligen_phrases)} != `gligen_boxes` {len(gligen_boxes)}"
+            )
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_latents
     def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
@@ -528,6 +536,8 @@ class StableDiffusionGLIGENGlobalTextPipeline(DiffusionPipeline, StableDiffusion
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
         gligen_scheduled_sampling_beta: float = 0.3,
+        gligen_phrases: List[str] = None,
+        gligen_boxes: List[List[float]] = None,
         gligen_global_image: Union[PIL.Image.Image, List[PIL.Image.Image]] = None,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
@@ -635,6 +645,8 @@ class StableDiffusionGLIGENGlobalTextPipeline(DiffusionPipeline, StableDiffusion
             height,
             width,
             callback_steps,
+            gligen_phrases,
+            gligen_boxes,
             negative_prompt,
             prompt_embeds,
             negative_prompt_embeds,
@@ -728,7 +740,13 @@ class StableDiffusionGLIGENGlobalTextPipeline(DiffusionPipeline, StableDiffusion
 
         if isinstance(gligen_global_image, PIL.Image.Image):
             gligen_global_image = [gligen_global_image]
-        gligen_global_image = [temp.resize((width, height)) for temp in gligen_global_image]
+        # this is originally done in pipeline_stable_diffusion_gligen_global
+        # for alignment with the original GLIGEN implementation
+        # however here for low-resolution condition, feel like it is not necessary
+        # because within the GLIGEN projection model or downsampler
+        # the image will be resized to the required size anyway
+        # gligen_global_image = [temp.resize((width, height)) for temp in gligen_global_image]
+        
         gligen_global_image = [(TF.to_tensor(temp) - 0.5) / 0.5 for temp in gligen_global_image]
         gligen_global_image = torch.stack(gligen_global_image, dim=0).to(device=device, dtype=self.unet.dtype)
         gligen_global_masks = torch.ones(len(gligen_global_image), 1).to(device=device, dtype=self.unet.dtype)
@@ -740,7 +758,7 @@ class StableDiffusionGLIGENGlobalTextPipeline(DiffusionPipeline, StableDiffusion
             masks = torch.cat([masks] * 2)
             masks[: repeat_batch // 2] = 0
             gligen_global_image = torch.cat([gligen_global_image] * 2)
-            gligen_global_masks = torch.cat([masks] * 2)
+            gligen_global_masks = torch.cat([gligen_global_masks] * 2)
             gligen_global_masks[: repeat_batch // 2] = 0
            
         if cross_attention_kwargs is None:
@@ -750,7 +768,7 @@ class StableDiffusionGLIGENGlobalTextPipeline(DiffusionPipeline, StableDiffusion
             "positive_embeddings": text_embeddings, 
             "masks": masks,
             "global_conditions": gligen_global_image, 
-            "global_masks": masks
+            "global_masks": gligen_global_masks
         }
 
         num_grounding_steps = int(gligen_scheduled_sampling_beta * len(timesteps))
