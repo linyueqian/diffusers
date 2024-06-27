@@ -758,10 +758,7 @@ class UNet2DConditionModel(
             else:
                 vae_scale_factor = 8 # hard-coded, but typically is the case
                 image_size = self.sample_size * vae_scale_factor
-                if attention_type in ["gated-canny", "gated-normal", "gated-depth"]:
-                    resize_input = image_size // 2
-                else:
-                    resize_input = image_size // self.gligen_condition_scale_factor
+                resize_input = image_size // self.gligen_condition_scale_factor
 
                 if "gated-text" in attention_type:
                     feature_type = "text-only"
