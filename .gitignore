@@ -176,3 +176,8 @@ tags
 
 # wandb
 wandb
+
+convert_*
+*.ipynb
+gligen*
+local
