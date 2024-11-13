@@ -654,6 +654,10 @@ def main():
     unet_config["in_channels"] = 3
     unet_config["out_channels"] = 3
     unet_config["sample_size"] = args.resolution
+    
+        
+    unet.conv_in = torch.nn.Conv2d(3, 320, kernel_size=(3, 3), padding=(1, 1))
+    unet.conv_out = torch.nn.Conv2d(320, 3, kernel_size=(3, 3), padding=(1, 1))
 
     # Freeze vae and text_encoder and set unet to trainable
     # vae.requires_grad_(False)

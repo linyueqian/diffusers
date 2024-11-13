@@ -39,6 +39,8 @@ from ..pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from .pipeline_output import DiffusionPipelineOutput
 from .safety_checker import DiffusionSafetyChecker
 
+import os
+import json
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
@@ -1059,3 +1061,40 @@ class DiffusionPipeline(
             return (image, has_nsfw_concept)
 
         return DiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+    
+    def register_modules(self, **kwargs):
+        # Override the registration to avoid the library lookup
+        for name, module in kwargs.items():
+            if module is not None:
+                setattr(self, name, module)
+    
+    def save_pretrained(self, save_directory: Union[str, os.PathLike], safe_serialization: bool = False):
+        """Save all pipeline components to the specified directory."""
+        os.makedirs(save_directory, exist_ok=True)
+
+        # Save each component
+        if self.text_encoder is not None:
+            self.text_encoder.save_pretrained(os.path.join(save_directory, "text_encoder"))
+        
+        if self.tokenizer is not None:
+            self.tokenizer.save_pretrained(os.path.join(save_directory, "tokenizer"))
+        
+        if self.unet is not None:
+            self.unet.save_pretrained(os.path.join(save_directory, "unet"))
+        
+        if self.scheduler is not None:
+            self.scheduler.save_config(os.path.join(save_directory, "scheduler"))
+
+        # Save the pipeline's config
+        config = {
+            "text_encoder": [self.text_encoder.__class__.__name__ if self.text_encoder else None],
+            "tokenizer": [self.tokenizer.__class__.__name__ if self.tokenizer else None],
+            "unet": [self.unet.__class__.__name__ if self.unet else None],
+            "scheduler": [self.scheduler.__class__.__name__ if self.scheduler else None],
+            "_class_name": self.__class__.__name__,
+            "_diffusers_version": "0.21.0",
+        }
+        
+        # Save the config
+        with open(os.path.join(save_directory, "model_index.json"), "w") as f:
+            json.dump(config, f, indent=2)
