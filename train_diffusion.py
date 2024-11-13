@@ -52,14 +52,14 @@ from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
 
-from diffusers.pipelines.diffusion.pipeline_diffusion import DiffusionPipeline
+from src.diffusers.pipelines.diffusion.pipeline_diffusion import DiffusionPipeline
 
 if is_wandb_available():
     import wandb
     
 import json
 from PIL import Image
-from datasets import Dataset, Image
+from datasets import Dataset
 import datasets
 
 
@@ -549,18 +549,6 @@ def load_custom_dataset(root_dir, image_size=64):
     
     # Create dataset
     dataset = Dataset.from_dict(data_dict)
-    
-    # Add image loading
-    def load_image(example):
-        return {"image": Image.open(example["image"]).convert("RGB")}
-    
-    dataset = dataset.map(
-        load_image,
-        num_proc=os.cpu_count(),
-        remove_columns=["image"],
-        desc="Loading images"
-    )
-    
     return dataset
 
 def main():
@@ -848,7 +836,7 @@ def main():
     )
 
     def preprocess_train(examples):
-        images = [image.convert("RGB") for image in examples[image_column]]
+        images = [Image.open(image_path).convert("RGB") for image_path in examples[image_column]]
         examples["pixel_values"] = [train_transforms(image) for image in images]
         examples["input_ids"] = tokenize_captions(examples)
         return examples
