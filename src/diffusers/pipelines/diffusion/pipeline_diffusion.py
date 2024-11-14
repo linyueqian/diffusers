@@ -1085,15 +1085,18 @@ class DiffusionPipeline(
         if self.scheduler is not None:
             self.scheduler.save_config(os.path.join(save_directory, "scheduler"))
 
-        # Save the pipeline's config
+        # Save the pipeline's config with library+class structure
         config = {
-            "text_encoder": [self.text_encoder.__class__.__name__ if self.text_encoder else None],
-            "tokenizer": [self.tokenizer.__class__.__name__ if self.tokenizer else None],
-            "unet": [self.unet.__class__.__name__ if self.unet else None],
-            "scheduler": [self.scheduler.__class__.__name__ if self.scheduler else None],
-            "_class_name": self.__class__.__name__,
+            "text_encoder": ["transformers", "CLIPTextModel"] if self.text_encoder else None,
+            "tokenizer": ["transformers", "CLIPTokenizer"] if self.tokenizer else None,
+            "unet": ["diffusers", "UNet2DConditionModel"] if self.unet else None,
+            "scheduler": ["diffusers", "DDPMScheduler"] if self.scheduler else None,
+            "_class_name": "DiffusionPipeline",
             "_diffusers_version": "0.21.0",
         }
+
+        # Remove None values
+        config = {k: v for k, v in config.items() if v is not None}
         
         # Save the config
         with open(os.path.join(save_directory, "model_index.json"), "w") as f:
